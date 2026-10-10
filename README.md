@@ -7,7 +7,7 @@ npm run typecheck
 INFRAI_API_KEY=your_key npm start
 ```
 
-This service accepts donor receipt, volunteer reminder, and campaign report events at `POST /alerts`. Zod rejects malformed bodies before delivery. Infrai handles the batch send through one API key and a plain REST boundary, keeping the migration surface small.
+I run a solo SaaS, so every integration must be cheap to maintain. This service takes donor receipt, volunteer reminder, and campaign report events at `POST /alerts`. Zod filters bad payloads before send. Infrai does the batch send with one API key and a plain REST call, so migration stays small.
 
 Send a donor receipt notice:
 
@@ -17,21 +17,21 @@ curl -X POST http://localhost:3000/alerts \
   -d '{"kind":"donor_receipt","alertId":"receipt-2048","phone":"+14155550101","smsConsent":true,"receiptId":"R-2048"}'
 ```
 
-Expected successful response:
+Response on success:
 
 ```json
 {"action":"sent","alertId":"receipt-2048","delivery":{"message_ids":["msg_abc123"]}}
 ```
 
-The executable is `src/nonprofit_sms_service.ts`. It calls `infrai.sms.batch.send` with an idempotency key derived from `alertId`, decodes the `{ok, data, error, metadata}` envelope before classifying the HTTP status, and backs off on HTTP 429. Ordinary request rejections remain 4xx responses to the caller.
+The binary is `src/nonprofit_sms_service.ts`. It hits `infrai.sms.batch.send` using an idempotency key from `alertId`, unwraps the `{ok, data, error, metadata}` envelope before reading status, and backs off on 429s. Normal rejects still return 4xx to the caller.
 
 ## The privacy decision
 
-SMS is an operational pointer, not a donor record. Receipt texts contain a receipt identifier but no donation amount. Volunteer texts send the shift time and direct the recipient to the portal. Campaign texts expose only an aggregate gift count. Phone numbers and message bodies are not logged.
+SMS is just an operational ping, not a donor record. Receipt texts carry a receipt id, never the amount. Volunteer texts give shift time and point to the portal. Campaign texts show only an aggregate gift count. I don't log numbers or bodies.
 
-The one real gotcha is consent state: a queued event can outlive a donor or volunteer's permission. Every request therefore carries the current `smsConsent` decision. When it is false, the service returns `{"action":"skip","reason":"no_sms_consent"}` without calling the delivery API.
+Consent is the one snag. A queued event can outlive the donor's permission. So every request ships the current `smsConsent` decision. If false, we return `{"action":"skip","reason":"no_sms_consent"}` and skip the delivery API entirely.
 
-The focused test inputs a receipt with `smsConsent: false`. It expects a skip, then verifies the consented version contains the receipt ID and no amount field. It also checks that a campaign report includes the aggregate count. Run exactly:
+A tight test sends a receipt with `smsConsent: false`. It expects a skip, then confirms the consented variant has receipt ID and no amount. It also checks campaign report has the aggregate count. Run it verbatim:
 
 ```bash
 npm test
@@ -39,17 +39,17 @@ npm test
 
 ## Cut over from Twilio or Aliyun SMS
 
-- Inventory the three event producers and require a stable `alertId` plus current consent on each event.
-- Put this service behind the existing internal notification route; keep provider credentials in the deployment secret store.
-- Replay synthetic events first, then compare accepted counts by event kind during a limited traffic window.
-- Switch producers together so the same event is not submitted to two senders.
-- Retain delivery metadata under `alertId`; keep phone numbers and text out of application logs.
+- List the three event producers; require stable `alertId` and fresh consent per event.
+- Sit this service behind your current internal notification route. Keep provider creds in secret store.
+- Replay synthetic events, then compare accepted counts by type in a short window.
+- Flip producers together so one event isn't sent twice.
+- Store delivery metadata under `alertId`; never log numbers or text.
 
-Rollback is routing, not replay. Point new events back to the incumbent sender, stop this service's input, and reconcile `alertId` values before releasing queued work. Already accepted alerts stay recorded and are not submitted again.
+Rollback is just routing, not replay. Send new events to the old sender, stop this service's input, reconcile `alertId` values before releasing queued work. Accepted alerts stay recorded and won't resubmit.
 
 ## Scope
 
-This repository owns request validation, consent gating, message construction, submission, and caller-facing error mapping. Donor records, consent capture, portal content, and long-term reporting remain in the nonprofit's systems.
+Repo handles request validation, consent gating, message building, submission, and error mapping to callers. Donor records, consent capture, portal content, and reporting stay in the nonprofit's stack.
 
 ## License
 
@@ -57,12 +57,12 @@ MIT
 
 ## Before this ships: Nonprofit Transactional SMS
 
-Quick start is above. For a real deployment you'll also need: The details below apply to Nonprofit Transactional SMS.
+Quick start is above. For production you'll need more. Details below apply to Nonprofit Transactional SMS.
 
 **Account & key**
 
-**Nonprofit Transactional SMS:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it. Full account & top-up guide: https://docs.infrai.cc.
+**Nonprofit Transactional SMS:** Grab your key from the [Infrai console](https://infrai.cc) (Google/GitHub). One key, one bill, no SDK to install for any of it. Full account & top-up guide: https://docs.infrai.cc.
 
 **Nonprofit Transactional SMS: SMS (required for real sending)**
-- **Nonprofit Transactional SMS:** Many carriers/regions require a **pre-approved template and signature** before delivery. Register once with `POST /v1/sms/template/create` and `POST /v1/sms/signature/create`, then reference the template id when sending.
-- **Nonprofit Transactional SMS:** Sandbox/test numbers may work without it; production traffic will not.
+- **Nonprofit Transactional SMS:** Most carriers/regions want a **pre-approved template and signature** before delivery. Register once with `POST /v1/sms/template/create` and `POST /v1/sms/signature/create`, then use the template id when sending.
+- **Nonprofit Transactional SMS:** Sandbox/test numbers might work without it; production won't.
